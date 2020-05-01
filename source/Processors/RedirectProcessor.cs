@@ -12,6 +12,7 @@ using Sitecore.Resources.Media;
 using SharedSource.RedirectModule.Classes;
 using SharedSource.RedirectModule.Helpers;
 using Sitecore.Rules;
+using Sitecore.SecurityModel;
 
 namespace SharedSource.RedirectModule.Processors
 {
@@ -34,12 +35,14 @@ namespace SharedSource.RedirectModule.Processors
                 var requestedUrl = HttpContext.Current.Request.Url.ToString();
                 var requestedPath = HttpContext.Current.Request.Url.AbsolutePath;
                 var requestedPathAndQuery = HttpContext.Current.Request.Url.PathAndQuery;
+                var requestedUrlNoQuery = HttpContext.Current.Request.Url.GetLeftPart(UriPartial.Path);
+
                 var db = Sitecore.Context.Database;
 
                 // First, we check for exact matches because those take priority over pattern matches.
                 if (Sitecore.Configuration.Settings.GetBoolSetting(Constants.Settings.RedirExactMatch, true))
                 {
-                    CheckForDirectMatch(db, requestedUrl, requestedPath, args);
+                    CheckForDirectMatch(db, requestedUrl, requestedPath, requestedUrlNoQuery, args);
                 }
 
                 // Next, we check for pattern matches because we didn't hit on an exact match.
@@ -56,20 +59,27 @@ namespace SharedSource.RedirectModule.Processors
             }
         }
 
-        private void CheckForDirectMatch(Database db, string requestedUrl, string requestedPath, HttpRequestArgs args)
+        private void CheckForDirectMatch(Database db, string requestedUrl, string requestedPath, string requestedUrlNoQuery, HttpRequestArgs args)
         {
             // Loop through the exact match entries to look for a match.
             foreach (Item possibleRedirect in GetRedirects(db, Constants.Templates.RedirectUrl, Constants.Templates.VersionedRedirectUrl, Sitecore.Configuration.Settings.GetSetting(Constants.Settings.QueryExactMatch)))
             {
                 if (requestedUrl.Equals(possibleRedirect[Constants.Fields.RequestedUrl], StringComparison.OrdinalIgnoreCase) ||
-                     requestedPath.Equals(possibleRedirect[Constants.Fields.RequestedUrl], StringComparison.OrdinalIgnoreCase))
+                     requestedPath.Equals(possibleRedirect[Constants.Fields.RequestedUrl], StringComparison.OrdinalIgnoreCase) || 
+                     requestedUrlNoQuery.Equals(possibleRedirect[Constants.Fields.RequestedUrl], StringComparison.OrdinalIgnoreCase))
                 {
                     var redirectToItemId = possibleRedirect.Fields[Constants.Fields.RedirectToItem];
                     var redirectToUrl = possibleRedirect.Fields[Constants.Fields.RedirectToUrl];
 
                     if (redirectToItemId.HasValue && !string.IsNullOrEmpty(redirectToItemId.ToString()))
                     {
-                        var redirectToItem = db.GetItem(ID.Parse(redirectToItemId));
+                        Item redirectToItem = null;
+
+                        //Avoid getting null if item is protected, this should be handled after redirection
+                        using (new SecurityDisabler())
+                        {
+                            redirectToItem = db.GetItem(ID.Parse(redirectToItemId));
+                        }
 
                         if (redirectToItem != null)
                         {
@@ -235,10 +245,10 @@ namespace SharedSource.RedirectModule.Processors
 
         private static void SendResponse(string redirectToUrl, string queryString, ResponseStatus responseStatusCode, HttpRequestArgs args)
         {
-            args.HttpContext.Response.Status = responseStatusCode.Status;
-            args.HttpContext.Response.StatusCode = responseStatusCode.StatusCode;
-            args.HttpContext.Response.AddHeader("Location", redirectToUrl + queryString);
-            args.HttpContext.Response.End();
+            HttpContext.Current.Response.Status = responseStatusCode.Status;
+            HttpContext.Current.Response.StatusCode = responseStatusCode.StatusCode;
+            HttpContext.Current.Response.AddHeader("Location", redirectToUrl + queryString);
+            HttpContext.Current.Response.End();
         }
 
         private static string GetRedirectToItemUrl(Item redirectToItem)
@@ -251,7 +261,14 @@ namespace SharedSource.RedirectModule.Processors
                 return redirectToUrl;
             }
 
-            return LinkManager.GetItemUrl(redirectToItem);
+            using (new SecurityDisabler())
+            {
+                var options = LinkManager.GetDefaultUrlOptions();
+                options.AlwaysIncludeServerUrl = true;
+                options.SiteResolving = true;
+
+                return LinkManager.GetItemUrl(redirectToItem, options);
+            }
         }
 
         private static ResponseStatus GetResponseStatus(Item redirectItem)
